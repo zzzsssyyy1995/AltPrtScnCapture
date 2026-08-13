@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using System.ComponentModel;
+using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Imaging;
 using System.Globalization;
@@ -7,20 +9,27 @@ using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Reflection;
+using System.Security.Principal;
 using System.Text;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 
 [assembly: AssemblyTitle("AltPrtScnCapture")]
-[assembly: AssemblyDescription("A lightweight Windows tray tool for capturing the active window with Alt + PrtScn.")]
+[assembly: AssemblyDescription("A lightweight Windows tray tool for capturing the active window with a configurable Print Screen hotkey.")]
 [assembly: AssemblyCompany("zzzsssyyy1995")]
 [assembly: AssemblyProduct("AltPrtScnCapture")]
 [assembly: AssemblyCopyright("Copyright (c) 2026 zzzsssyyy1995")]
-[assembly: AssemblyVersion("1.0.0.0")]
-[assembly: AssemblyFileVersion("1.0.0.0")]
+[assembly: AssemblyVersion("1.1.2.0")]
+[assembly: AssemblyFileVersion("1.1.2.0")]
 
 namespace AltPrtScnCapture
 {
+    internal enum HotKeyMode
+    {
+        PrintScreen,
+        AltPrintScreen
+    }
+
     internal static class Program
     {
         [STAThread]
@@ -37,12 +46,18 @@ namespace AltPrtScnCapture
         private readonly NotifyIcon trayIcon;
         private readonly ToolStripMenuItem startItem;
         private readonly ToolStripMenuItem stopItem;
+        private readonly ToolStripMenuItem printScreenHotKeyItem;
+        private readonly ToolStripMenuItem altPrintScreenHotKeyItem;
+        private readonly ToolStripMenuItem elevationItem;
         private readonly ToolStripMenuItem mergeItem;
         private readonly HotKeyWindow hotKeyWindow;
         private readonly Icon applicationIcon;
         private readonly string settingsFile;
+        private readonly string hotKeySettingsFile;
         private string saveDirectory;
+        private HotKeyMode hotKeyMode;
         private bool isMonitoring;
+        private bool isExiting;
 
         public TrayApplicationContext()
         {
@@ -50,32 +65,50 @@ namespace AltPrtScnCapture
                 Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
                 "AltPrtScnCapture",
                 "settings.txt");
+            hotKeySettingsFile = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "AltPrtScnCapture",
+                "hotkey.txt");
 
             applicationIcon = LoadApplicationIcon();
 
             bool firstRun = !File.Exists(settingsFile);
             saveDirectory = LoadSaveDirectory();
+            hotKeyMode = LoadHotKeyMode();
             hotKeyWindow = new HotKeyWindow();
             hotKeyWindow.HotKeyPressed += OnHotKeyPressed;
 
             ContextMenuStrip menu = new ContextMenuStrip();
             startItem = new ToolStripMenuItem("开始检测", null, OnStartMonitoring);
             stopItem = new ToolStripMenuItem("停止检测", null, OnStopMonitoring);
+            ToolStripMenuItem hotKeyItem = new ToolStripMenuItem("截图快捷键");
+            printScreenHotKeyItem = new ToolStripMenuItem("PrtScn", null, OnSelectPrintScreenHotKey);
+            altPrintScreenHotKeyItem = new ToolStripMenuItem("Alt + PrtScn", null, OnSelectAltPrintScreenHotKey);
+            hotKeyItem.DropDownItems.Add(printScreenHotKeyItem);
+            hotKeyItem.DropDownItems.Add(altPrintScreenHotKeyItem);
             ToolStripMenuItem folderItem = new ToolStripMenuItem("设置保存目录", null, OnSelectFolder);
             mergeItem = new ToolStripMenuItem("合并为PDF", null, OnMergePdf);
+            bool isAdministrator = IsRunningAsAdministrator();
+            elevationItem = new ToolStripMenuItem(
+                isAdministrator ? "管理员模式 ✓" : "以管理员身份重启",
+                null,
+                OnRestartAsAdministrator);
+            elevationItem.Enabled = !isAdministrator;
             ToolStripMenuItem exitItem = new ToolStripMenuItem("退出", null, OnExit);
 
             menu.Items.Add(startItem);
             menu.Items.Add(stopItem);
+            menu.Items.Add(hotKeyItem);
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add(folderItem);
             menu.Items.Add(mergeItem);
             menu.Items.Add(new ToolStripSeparator());
+            menu.Items.Add(elevationItem);
             menu.Items.Add(exitItem);
 
             trayIcon = new NotifyIcon();
             trayIcon.Icon = applicationIcon;
-            trayIcon.Text = "Alt + PrtScn 截图（未检测）";
+            trayIcon.Text = "截图工具（未检测）";
             trayIcon.ContextMenuStrip = menu;
             trayIcon.Visible = true;
 
@@ -126,11 +159,41 @@ namespace AltPrtScnCapture
             File.WriteAllText(settingsFile, saveDirectory, new UTF8Encoding(false));
         }
 
+        private HotKeyMode LoadHotKeyMode()
+        {
+            try
+            {
+                if (File.Exists(hotKeySettingsFile))
+                {
+                    string configured = File.ReadAllText(hotKeySettingsFile, Encoding.UTF8).Trim();
+                    if (configured.Equals("AltPrintScreen", StringComparison.OrdinalIgnoreCase))
+                    {
+                        return HotKeyMode.AltPrintScreen;
+                    }
+                }
+            }
+            catch
+            {
+                // Invalid or unreadable settings fall back to the simpler Print Screen key.
+            }
+            return HotKeyMode.PrintScreen;
+        }
+
+        private void SaveHotKeyMode()
+        {
+            string parent = Path.GetDirectoryName(hotKeySettingsFile);
+            if (!Directory.Exists(parent))
+            {
+                Directory.CreateDirectory(parent);
+            }
+            File.WriteAllText(hotKeySettingsFile, hotKeyMode.ToString(), new UTF8Encoding(false));
+        }
+
         private void ShowFirstRunFolderPrompt()
         {
             MessageBox.Show(
                 "首次使用，请选择截图保存目录。若取消，将使用系统“图片”文件夹。\n\n程序当前未开始检测，请通过托盘菜单手动开启。",
-                "Alt + PrtScn 截图",
+                "活动窗口截图",
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Information);
             SelectFolder(true);
@@ -172,19 +235,50 @@ namespace AltPrtScnCapture
                 return;
             }
 
-            if (!hotKeyWindow.Register())
+            if (!hotKeyWindow.Register(hotKeyMode))
             {
+                if (hotKeyMode == HotKeyMode.PrintScreen)
+                {
+                    DialogResult fallback = MessageBox.Show(
+                        "无法启动 PrtScn 按键拦截。\n\n是否切换为 Alt + PrtScn 并开始检测？",
+                        "快捷键不可用",
+                        MessageBoxButtons.YesNo,
+                        MessageBoxIcon.Warning);
+                    if (fallback == DialogResult.Yes && hotKeyWindow.Register(HotKeyMode.AltPrintScreen))
+                    {
+                        hotKeyMode = HotKeyMode.AltPrintScreen;
+                        SaveHotKeyMode();
+                        CompleteMonitoringStart();
+                        return;
+                    }
+
+                    if (fallback == DialogResult.Yes)
+                    {
+                        MessageBox.Show(
+                            "Alt + PrtScn 也无法注册。该快捷键可能已被其他程序占用。",
+                            "启动检测失败",
+                            MessageBoxButtons.OK,
+                            MessageBoxIcon.Error);
+                    }
+                    return;
+                }
+
                 MessageBox.Show(
-                    "无法注册 Alt + PrtScn。该组合键可能已被其他程序占用。",
+                    "无法注册 " + GetHotKeyDisplayName(hotKeyMode) + "。该快捷键可能已被其他程序占用。",
                     "启动检测失败",
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Error);
                 return;
             }
 
+            CompleteMonitoringStart();
+        }
+
+        private void CompleteMonitoringStart()
+        {
             isMonitoring = true;
             UpdateMenuState();
-            ShowBalloon("已开始检测", "按 Alt + PrtScn 截取当前活动窗口。", ToolTipIcon.Info);
+            ShowBalloon("已开始检测", "按 " + GetHotKeyDisplayName(hotKeyMode) + " 截取当前活动窗口。", ToolTipIcon.Info);
         }
 
         private void OnStopMonitoring(object sender, EventArgs e)
@@ -197,19 +291,78 @@ namespace AltPrtScnCapture
             hotKeyWindow.Unregister();
             isMonitoring = false;
             UpdateMenuState();
-            ShowBalloon("已停止检测", "Alt + PrtScn 监听已关闭。", ToolTipIcon.Info);
+            ShowBalloon("已停止检测", GetHotKeyDisplayName(hotKeyMode) + " 监听已关闭。", ToolTipIcon.Info);
+        }
+
+        private void OnSelectPrintScreenHotKey(object sender, EventArgs e)
+        {
+            ChangeHotKeyMode(HotKeyMode.PrintScreen);
+        }
+
+        private void OnSelectAltPrintScreenHotKey(object sender, EventArgs e)
+        {
+            ChangeHotKeyMode(HotKeyMode.AltPrintScreen);
+        }
+
+        private void ChangeHotKeyMode(HotKeyMode newMode)
+        {
+            if (newMode == hotKeyMode)
+            {
+                return;
+            }
+
+            HotKeyMode previousMode = hotKeyMode;
+            if (!isMonitoring)
+            {
+                hotKeyMode = newMode;
+                SaveHotKeyMode();
+                UpdateMenuState();
+                ShowBalloon("快捷键已更新", "开始检测后使用 " + GetHotKeyDisplayName(hotKeyMode) + "。", ToolTipIcon.Info);
+                return;
+            }
+
+            hotKeyWindow.Unregister();
+            if (hotKeyWindow.Register(newMode))
+            {
+                hotKeyMode = newMode;
+                SaveHotKeyMode();
+                UpdateMenuState();
+                ShowBalloon("快捷键已切换", "现在使用 " + GetHotKeyDisplayName(hotKeyMode) + "。", ToolTipIcon.Info);
+                return;
+            }
+
+            bool restored = hotKeyWindow.Register(previousMode);
+            if (!restored)
+            {
+                isMonitoring = false;
+            }
+            UpdateMenuState();
+
+            MessageBox.Show(
+                restored
+                    ? "无法注册 " + GetHotKeyDisplayName(newMode) + "，已恢复使用 " + GetHotKeyDisplayName(previousMode) + "。"
+                    : "无法注册 " + GetHotKeyDisplayName(newMode) + "，原快捷键也无法恢复。检测已停止。",
+                "切换快捷键失败",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Warning);
         }
 
         private void UpdateMenuState()
         {
             startItem.Enabled = !isMonitoring;
             stopItem.Enabled = isMonitoring;
+            printScreenHotKeyItem.Checked = hotKeyMode == HotKeyMode.PrintScreen;
+            altPrintScreenHotKeyItem.Checked = hotKeyMode == HotKeyMode.AltPrintScreen;
             if (trayIcon != null)
             {
-                trayIcon.Text = isMonitoring
-                    ? "Alt + PrtScn 截图（检测中）"
-                    : "Alt + PrtScn 截图（未检测）";
+                trayIcon.Text = GetHotKeyDisplayName(hotKeyMode)
+                    + (isMonitoring ? " 截图（检测中）" : " 截图（未检测）");
             }
+        }
+
+        private static string GetHotKeyDisplayName(HotKeyMode mode)
+        {
+            return mode == HotKeyMode.PrintScreen ? "PrtScn" : "Alt + PrtScn";
         }
 
         private void OnHotKeyPressed(object sender, EventArgs e)
@@ -294,12 +447,92 @@ namespace AltPrtScnCapture
             trayIcon.ShowBalloonTip(2500);
         }
 
+        private void OnRestartAsAdministrator(object sender, EventArgs e)
+        {
+            if (IsRunningAsAdministrator())
+            {
+                return;
+            }
+
+            DialogResult confirmation = MessageBox.Show(
+                "管理员权限可让 PrtScn 在 360 安全卫士、企业管理软件等高权限窗口中正常工作。\n\n程序将退出当前实例并请求管理员权限重新启动。重新启动后仍需手动选择“开始检测”。是否继续？",
+                "以管理员身份重启",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Information);
+            if (confirmation != DialogResult.Yes)
+            {
+                return;
+            }
+
+            try
+            {
+                ProcessStartInfo startInfo = new ProcessStartInfo();
+                startInfo.FileName = Application.ExecutablePath;
+                startInfo.WorkingDirectory = AppDomain.CurrentDomain.BaseDirectory;
+                startInfo.UseShellExecute = true;
+                startInfo.Verb = "runas";
+                Process elevatedProcess = Process.Start(startInfo);
+                if (elevatedProcess == null)
+                {
+                    throw new InvalidOperationException("Windows 未能创建管理员进程。");
+                }
+                elevatedProcess.Dispose();
+                ShutdownApplication();
+            }
+            catch (Win32Exception error)
+            {
+                if (error.NativeErrorCode != 1223)
+                {
+                    MessageBox.Show(
+                        "无法以管理员身份重新启动：" + error.Message,
+                        "重新启动失败",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Error);
+                }
+                else
+                {
+                    ShowBalloon("已取消", "程序继续以普通权限运行。", ToolTipIcon.Info);
+                }
+            }
+            catch (Exception error)
+            {
+                MessageBox.Show(
+                    "无法以管理员身份重新启动：" + error.Message,
+                    "重新启动失败",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
+            }
+        }
+
+        private static bool IsRunningAsAdministrator()
+        {
+            try
+            {
+                using (WindowsIdentity identity = WindowsIdentity.GetCurrent())
+                {
+                    WindowsPrincipal principal = new WindowsPrincipal(identity);
+                    return principal.IsInRole(WindowsBuiltInRole.Administrator);
+                }
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
         private void OnExit(object sender, EventArgs e)
         {
-            if (isMonitoring)
+            ShutdownApplication();
+        }
+
+        private void ShutdownApplication()
+        {
+            if (isExiting)
             {
-                hotKeyWindow.Unregister();
+                return;
             }
+            isExiting = true;
+            hotKeyWindow.Unregister();
             trayIcon.Visible = false;
             trayIcon.Dispose();
             applicationIcon.Dispose();
@@ -328,25 +561,62 @@ namespace AltPrtScnCapture
     {
         private const int HotKeyId = 0x5353;
         private const int WmHotKey = 0x0312;
+        private const int WmHookHotKey = 0x8001;
+        private const int WmKeyDown = 0x0100;
+        private const int WmKeyUp = 0x0101;
+        private const int WmSysKeyDown = 0x0104;
+        private const int WmSysKeyUp = 0x0105;
+        private const int WhKeyboardLl = 13;
         private const uint ModAlt = 0x0001;
         private const uint ModNoRepeat = 0x4000;
         private const uint VkSnapshot = 0x2C;
+        private const uint VkShift = 0x10;
+        private const uint VkControl = 0x11;
+        private const uint VkMenu = 0x12;
+        private const uint VkLWin = 0x5B;
+        private const uint VkRWin = 0x5C;
         private bool registered;
+        private bool registeredHotKey;
+        private bool printScreenDown;
+        private bool shiftDown;
+        private bool controlDown;
+        private bool altDown;
+        private bool windowsDown;
+        private IntPtr keyboardHook;
+        private readonly LowLevelKeyboardProc keyboardProc;
 
         public event EventHandler HotKeyPressed;
 
         public HotKeyWindow()
         {
+            keyboardProc = KeyboardHookCallback;
             CreateHandle(new CreateParams());
         }
 
-        public bool Register()
+        public bool Register(HotKeyMode mode)
         {
             if (registered)
             {
                 return true;
             }
-            registered = RegisterHotKey(Handle, HotKeyId, ModAlt | ModNoRepeat, VkSnapshot);
+            if (mode == HotKeyMode.PrintScreen)
+            {
+                InitializeModifierState();
+                keyboardHook = SetWindowsHookEx(
+                    WhKeyboardLl,
+                    keyboardProc,
+                    GetModuleHandle(null),
+                    0);
+                registered = keyboardHook != IntPtr.Zero;
+                return registered;
+            }
+
+            registeredHotKey = RegisterHotKey(
+                Handle,
+                HotKeyId,
+                ModAlt | ModNoRepeat,
+                VkSnapshot);
+            registered = registeredHotKey;
             return registered;
         }
 
@@ -356,13 +626,24 @@ namespace AltPrtScnCapture
             {
                 return;
             }
-            UnregisterHotKey(Handle, HotKeyId);
+            if (keyboardHook != IntPtr.Zero)
+            {
+                UnhookWindowsHookEx(keyboardHook);
+                keyboardHook = IntPtr.Zero;
+            }
+            if (registeredHotKey)
+            {
+                UnregisterHotKey(Handle, HotKeyId);
+                registeredHotKey = false;
+            }
+            printScreenDown = false;
             registered = false;
         }
 
         protected override void WndProc(ref Message message)
         {
-            if (message.Msg == WmHotKey && message.WParam.ToInt32() == HotKeyId)
+            if ((message.Msg == WmHotKey && message.WParam.ToInt32() == HotKeyId)
+                || message.Msg == WmHookHotKey)
             {
                 EventHandler handler = HotKeyPressed;
                 if (handler != null)
@@ -371,6 +652,87 @@ namespace AltPrtScnCapture
                 }
             }
             base.WndProc(ref message);
+        }
+
+        private IntPtr KeyboardHookCallback(int code, IntPtr wParam, IntPtr lParam)
+        {
+            if (code < 0)
+            {
+                return CallNextHookEx(keyboardHook, code, wParam, lParam);
+            }
+
+            int message = wParam.ToInt32();
+            bool isDown = message == WmKeyDown || message == WmSysKeyDown;
+            bool isUp = message == WmKeyUp || message == WmSysKeyUp;
+            KeyboardHookData data = (KeyboardHookData)Marshal.PtrToStructure(
+                lParam,
+                typeof(KeyboardHookData));
+
+            UpdateModifierState(data.VirtualKey, isDown, isUp);
+
+            if (data.VirtualKey == VkSnapshot)
+            {
+                if (isDown)
+                {
+                    if (printScreenDown)
+                    {
+                        return new IntPtr(1);
+                    }
+
+                    if (!shiftDown && !controlDown && !altDown && !windowsDown)
+                    {
+                        printScreenDown = true;
+                        PostMessage(Handle, WmHookHotKey, IntPtr.Zero, IntPtr.Zero);
+                        return new IntPtr(1);
+                    }
+                }
+                else if (isUp && printScreenDown)
+                {
+                    printScreenDown = false;
+                    return new IntPtr(1);
+                }
+            }
+
+            return CallNextHookEx(keyboardHook, code, wParam, lParam);
+        }
+
+        private void InitializeModifierState()
+        {
+            shiftDown = IsKeyDown(VkShift);
+            controlDown = IsKeyDown(VkControl);
+            altDown = IsKeyDown(VkMenu);
+            windowsDown = IsKeyDown(VkLWin) || IsKeyDown(VkRWin);
+        }
+
+        private static bool IsKeyDown(uint virtualKey)
+        {
+            return (GetAsyncKeyState((int)virtualKey) & 0x8000) != 0;
+        }
+
+        private void UpdateModifierState(uint virtualKey, bool isDown, bool isUp)
+        {
+            if (!isDown && !isUp)
+            {
+                return;
+            }
+
+            bool state = isDown;
+            if (virtualKey == VkShift || virtualKey == 0xA0 || virtualKey == 0xA1)
+            {
+                shiftDown = state;
+            }
+            else if (virtualKey == VkControl || virtualKey == 0xA2 || virtualKey == 0xA3)
+            {
+                controlDown = state;
+            }
+            else if (virtualKey == VkMenu || virtualKey == 0xA4 || virtualKey == 0xA5)
+            {
+                altDown = state;
+            }
+            else if (virtualKey == VkLWin || virtualKey == VkRWin)
+            {
+                windowsDown = state;
+            }
         }
 
         public void Dispose()
@@ -384,6 +746,40 @@ namespace AltPrtScnCapture
 
         [DllImport("user32.dll", SetLastError = true)]
         private static extern bool UnregisterHotKey(IntPtr hWnd, int id);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern IntPtr SetWindowsHookEx(
+            int hookType,
+            LowLevelKeyboardProc callback,
+            IntPtr module,
+            uint threadId);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern bool UnhookWindowsHookEx(IntPtr hook);
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr CallNextHookEx(IntPtr hook, int code, IntPtr wParam, IntPtr lParam);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern bool PostMessage(IntPtr window, int message, IntPtr wParam, IntPtr lParam);
+
+        [DllImport("user32.dll")]
+        private static extern short GetAsyncKeyState(int virtualKey);
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Auto)]
+        private static extern IntPtr GetModuleHandle(string moduleName);
+
+        private delegate IntPtr LowLevelKeyboardProc(int code, IntPtr wParam, IntPtr lParam);
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct KeyboardHookData
+        {
+            public uint VirtualKey;
+            public uint ScanCode;
+            public uint Flags;
+            public uint Time;
+            public UIntPtr ExtraInfo;
+        }
     }
 
     internal static class WindowCapture
