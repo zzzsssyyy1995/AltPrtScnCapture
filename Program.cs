@@ -19,8 +19,8 @@ using System.Windows.Forms;
 [assembly: AssemblyCompany("zzzsssyyy1995")]
 [assembly: AssemblyProduct("AltPrtScnCapture")]
 [assembly: AssemblyCopyright("Copyright (c) 2026 zzzsssyyy1995")]
-[assembly: AssemblyVersion("1.1.2.0")]
-[assembly: AssemblyFileVersion("1.1.2.0")]
+[assembly: AssemblyVersion("1.2.0.0")]
+[assembly: AssemblyFileVersion("1.2.0.0")]
 
 namespace AltPrtScnCapture
 {
@@ -33,11 +33,38 @@ namespace AltPrtScnCapture
     internal static class Program
     {
         [STAThread]
-        private static void Main()
+        private static void Main(string[] args)
         {
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
-            Application.Run(new TrayApplicationContext());
+            bool resume = args.Length == 3 && args[0] == "--admin-prtscn";
+            string directory = null;
+            if (resume)
+            {
+                try
+                {
+                    int parentId = Int32.Parse(args[1], CultureInfo.InvariantCulture);
+                    directory = Encoding.UTF8.GetString(Convert.FromBase64String(args[2]));
+                    try
+                    {
+                        using (Process parent = Process.GetProcessById(parentId))
+                        {
+                            if (!parent.WaitForExit(10000))
+                            {
+                                MessageBox.Show("原实例尚未退出，请退出原实例后重新启动。", "模式切换未完成");
+                                return;
+                            }
+                        }
+                    }
+                    catch (ArgumentException) { } // Parent already exited.
+                }
+                catch (Exception error)
+                {
+                    MessageBox.Show(error.Message, "无法恢复截图模式");
+                    return;
+                }
+            }
+            Application.Run(new TrayApplicationContext(resume, directory));
         }
     }
 
@@ -48,7 +75,6 @@ namespace AltPrtScnCapture
         private readonly ToolStripMenuItem stopItem;
         private readonly ToolStripMenuItem printScreenHotKeyItem;
         private readonly ToolStripMenuItem altPrintScreenHotKeyItem;
-        private readonly ToolStripMenuItem elevationItem;
         private readonly ToolStripMenuItem mergeItem;
         private readonly HotKeyWindow hotKeyWindow;
         private readonly Icon applicationIcon;
@@ -59,7 +85,7 @@ namespace AltPrtScnCapture
         private bool isMonitoring;
         private bool isExiting;
 
-        public TrayApplicationContext()
+        public TrayApplicationContext(bool resumeAdminCapture = false, string resumeDirectory = null)
         {
             settingsFile = Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
@@ -81,19 +107,13 @@ namespace AltPrtScnCapture
             ContextMenuStrip menu = new ContextMenuStrip();
             startItem = new ToolStripMenuItem("开始检测", null, OnStartMonitoring);
             stopItem = new ToolStripMenuItem("停止检测", null, OnStopMonitoring);
-            ToolStripMenuItem hotKeyItem = new ToolStripMenuItem("截图快捷键");
-            printScreenHotKeyItem = new ToolStripMenuItem("PrtScn", null, OnSelectPrintScreenHotKey);
-            altPrintScreenHotKeyItem = new ToolStripMenuItem("Alt + PrtScn", null, OnSelectAltPrintScreenHotKey);
-            hotKeyItem.DropDownItems.Add(printScreenHotKeyItem);
+            ToolStripMenuItem hotKeyItem = new ToolStripMenuItem("截图模式");
+            printScreenHotKeyItem = new ToolStripMenuItem("PrtScn 一键截图（管理员）", null, OnSelectPrintScreenHotKey);
+            altPrintScreenHotKeyItem = new ToolStripMenuItem("Alt + PrtScn 截图", null, OnSelectAltPrintScreenHotKey);
             hotKeyItem.DropDownItems.Add(altPrintScreenHotKeyItem);
+            hotKeyItem.DropDownItems.Add(printScreenHotKeyItem);
             ToolStripMenuItem folderItem = new ToolStripMenuItem("设置保存目录", null, OnSelectFolder);
             mergeItem = new ToolStripMenuItem("合并为PDF", null, OnMergePdf);
-            bool isAdministrator = IsRunningAsAdministrator();
-            elevationItem = new ToolStripMenuItem(
-                isAdministrator ? "管理员模式 ✓" : "以管理员身份重启",
-                null,
-                OnRestartAsAdministrator);
-            elevationItem.Enabled = !isAdministrator;
             ToolStripMenuItem exitItem = new ToolStripMenuItem("退出", null, OnExit);
 
             menu.Items.Add(startItem);
@@ -103,7 +123,6 @@ namespace AltPrtScnCapture
             menu.Items.Add(folderItem);
             menu.Items.Add(mergeItem);
             menu.Items.Add(new ToolStripSeparator());
-            menu.Items.Add(elevationItem);
             menu.Items.Add(exitItem);
 
             trayIcon = new NotifyIcon();
@@ -114,7 +133,7 @@ namespace AltPrtScnCapture
 
             UpdateMenuState();
 
-            if (firstRun)
+            if (resumeAdminCapture || firstRun)
             {
                 Timer firstRunTimer = new Timer();
                 firstRunTimer.Interval = 500;
@@ -122,7 +141,21 @@ namespace AltPrtScnCapture
                 {
                     firstRunTimer.Stop();
                     firstRunTimer.Dispose();
-                    ShowFirstRunFolderPrompt();
+                    if (resumeAdminCapture)
+                    {
+                        if (!IsRunningAsAdministrator())
+                        {
+                            MessageBox.Show("未获得管理员权限，未开启 PrtScn 检测。", "模式切换失败");
+                            return;
+                        }
+                        saveDirectory = resumeDirectory;
+                        hotKeyMode = HotKeyMode.PrintScreen;
+                        SaveSettings();
+                        SaveHotKeyMode();
+                        UpdateMenuState();
+                        OnStartMonitoring(this, EventArgs.Empty);
+                    }
+                    else ShowFirstRunFolderPrompt();
                 };
                 firstRunTimer.Start();
             }
@@ -166,6 +199,8 @@ namespace AltPrtScnCapture
                 if (File.Exists(hotKeySettingsFile))
                 {
                     string configured = File.ReadAllText(hotKeySettingsFile, Encoding.UTF8).Trim();
+                    if (configured.Equals("PrintScreen", StringComparison.OrdinalIgnoreCase))
+                        return HotKeyMode.PrintScreen;
                     if (configured.Equals("AltPrintScreen", StringComparison.OrdinalIgnoreCase))
                     {
                         return HotKeyMode.AltPrintScreen;
@@ -174,19 +209,26 @@ namespace AltPrtScnCapture
             }
             catch
             {
-                // Invalid or unreadable settings fall back to the simpler Print Screen key.
+                // Default mode does not require elevation.
             }
-            return HotKeyMode.PrintScreen;
+            return HotKeyMode.AltPrintScreen;
         }
 
         private void SaveHotKeyMode()
         {
+            try
+            {
             string parent = Path.GetDirectoryName(hotKeySettingsFile);
             if (!Directory.Exists(parent))
             {
                 Directory.CreateDirectory(parent);
             }
             File.WriteAllText(hotKeySettingsFile, hotKeyMode.ToString(), new UTF8Encoding(false));
+            }
+            catch (Exception error)
+            {
+                ShowBalloon("设置未保存", "本次选择仍有效：" + error.Message, ToolTipIcon.Warning);
+            }
         }
 
         private void ShowFirstRunFolderPrompt()
@@ -235,6 +277,11 @@ namespace AltPrtScnCapture
                 return;
             }
 
+            if (hotKeyMode == HotKeyMode.PrintScreen && !IsRunningAsAdministrator())
+            {
+                OnRestartAsAdministrator(sender, e);
+                return;
+            }
             if (!hotKeyWindow.Register(hotKeyMode))
             {
                 if (hotKeyMode == HotKeyMode.PrintScreen)
@@ -296,7 +343,14 @@ namespace AltPrtScnCapture
 
         private void OnSelectPrintScreenHotKey(object sender, EventArgs e)
         {
+            if (!IsRunningAsAdministrator())
+            {
+                OnRestartAsAdministrator(sender, e);
+                return;
+            }
             ChangeHotKeyMode(HotKeyMode.PrintScreen);
+            if (hotKeyMode == HotKeyMode.PrintScreen && !isMonitoring)
+                OnStartMonitoring(sender, e);
         }
 
         private void OnSelectAltPrintScreenHotKey(object sender, EventArgs e)
@@ -356,7 +410,8 @@ namespace AltPrtScnCapture
             if (trayIcon != null)
             {
                 trayIcon.Text = GetHotKeyDisplayName(hotKeyMode)
-                    + (isMonitoring ? " 截图（检测中）" : " 截图（未检测）");
+                    + (IsRunningAsAdministrator() ? " [管理员]" : " [普通权限]")
+                    + (isMonitoring ? "（检测中）" : "（未检测）");
             }
         }
 
@@ -454,13 +509,9 @@ namespace AltPrtScnCapture
                 return;
             }
 
-            DialogResult confirmation = MessageBox.Show(
-                "管理员权限可让 PrtScn 在 360 安全卫士、企业管理软件等高权限窗口中正常工作。\n\n程序将退出当前实例并请求管理员权限重新启动。重新启动后仍需手动选择“开始检测”。是否继续？",
-                "以管理员身份重启",
-                MessageBoxButtons.YesNo,
-                MessageBoxIcon.Information);
-            if (confirmation != DialogResult.Yes)
+            if (!mergeItem.Enabled)
             {
+                MessageBox.Show("请等待 PDF 合并完成后再切换管理员截图模式。", "正在合并 PDF");
                 return;
             }
 
@@ -471,6 +522,10 @@ namespace AltPrtScnCapture
                 startInfo.WorkingDirectory = AppDomain.CurrentDomain.BaseDirectory;
                 startInfo.UseShellExecute = true;
                 startInfo.Verb = "runas";
+                startInfo.WindowStyle = ProcessWindowStyle.Hidden;
+                startInfo.Arguments = "--admin-prtscn "
+                    + Process.GetCurrentProcess().Id.ToString(CultureInfo.InvariantCulture)
+                    + " " + Convert.ToBase64String(Encoding.UTF8.GetBytes(saveDirectory));
                 Process elevatedProcess = Process.Start(startInfo);
                 if (elevatedProcess == null)
                 {

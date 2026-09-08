@@ -15,7 +15,9 @@
 
 ## Features
 
-- Capture the foreground window with `PrtScn` by default while suppressing the Windows snipping overlay, or switch to `Alt + PrtScn` from the tray menu.
+Version 1.2.0 combines elevation and Print Screen into **截图模式 → PrtScn 一键截图（管理员）**. Selecting it requests UAC and automatically starts capture after restart. Cancelling UAC preserves the current mode. New installations default to Alt + PrtScn; ordinary launches never start monitoring automatically. Switching back to Alt + PrtScn does not lower process privileges; the tray tooltip shows actual privileges.
+
+- Choose Alt + PrtScn or administrator Print Screen capture from the capture-mode menu.
 - Save PNG files automatically using timestamp-based names.
 - Start and stop monitoring from the system tray; monitoring is off at startup.
 - Choose and remember the screenshot directory.
@@ -30,7 +32,7 @@
 2. Extract it and run `AltPrtScnCapture.exe`.
 3. Select a screenshot folder on first launch, or cancel to use the Pictures folder.
 4. Right-click the blue tray icon and choose **开始检测** (Start monitoring).
-5. Press `PrtScn` to capture the active window. If it conflicts with another app, choose `Alt + PrtScn` from the **截图快捷键** submenu.
+5. Press Alt + PrtScn, or select the administrator Print Screen mode to elevate and start one-key capture.
 
 > The executable is not commercially code-signed. Windows SmartScreen may show an “Unknown publisher” warning on first launch.
 
@@ -40,11 +42,9 @@
 | --- | --- |
 | 开始检测 | Register the global hotkey |
 | 停止检测 | Unregister the hotkey |
-| 截图快捷键 | Choose `PrtScn` or `Alt + PrtScn`; the active choice is checked |
+| 截图模式 | Choose Alt + PrtScn or administrator Print Screen; current choice is checked |
 | 设置保存目录 | Choose the output directory |
 | 合并为PDF | Merge supported images by filename |
-| 以管理员身份重启 | Restart through UAC to capture elevated or security-software windows |
-| 管理员模式 ✓ | Indicate that the current instance is elevated |
 | 退出 | Close the application |
 
 ## Build from source
@@ -63,7 +63,7 @@ The executable is written to `dist\AltPrtScnCapture.exe`. The build script uses 
 
 - In `PrtScn` mode, the app consumes the unmodified key to suppress the Windows snipping overlay; modified Print Screen combinations remain available to Windows.
 - If the low-level keyboard hook cannot be installed, the app offers `Alt + PrtScn` as a fallback.
-- A normal-privilege instance cannot receive bare `PrtScn` input while an elevated window is active. Use **以管理员身份重启** for such applications.
+- Print Screen mode requires elevation and requests it when necessary.
 - Secure desktops, lock screens and protected content may not be capturable.
 - Screen-pixel capture can include another window if it overlaps the target window.
 - The output directory and hotkey choice are stored under `%LOCALAPPDATA%\AltPrtScnCapture`.

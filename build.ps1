@@ -21,7 +21,7 @@ New-Item -ItemType Directory -Force -Path $distDir | Out-Null
     /optimize+ `
     /win32manifest:$manifest `
     /win32icon:$icon `
-    /resource:$icon,AltPrtScnCapture.app-icon.ico `
+    "/resource:$icon,AltPrtScnCapture.app-icon.ico" `
     /reference:System.dll `
     /reference:System.Core.dll `
     /reference:System.Drawing.dll `

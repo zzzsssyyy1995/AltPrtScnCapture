@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.2.0 - 2026-09-08
+
+- Combined administrator restart and Print Screen capture into one capture mode.
+- Default to Alt + PrtScn for new installations.
+- Selecting administrator Print Screen mode requests UAC and automatically starts capture after the previous process exits.
+- Cancelling UAC preserves the original mode and monitoring state.
+- Removed the standalone administrator restart menu; tray tooltip reports actual privilege and monitoring state.
+- Wait for PDF merging to finish before restarting.
+- Fixed resource argument quoting for PowerShell 7 builds.
+
 ## 1.1.2 - 2026-08-13
 
 - Added an on-demand **Restart as administrator** tray command.
